@@ -1,51 +1,20 @@
-# ML Safety -- CARLA Perception Safety Evaluation
+# ML Safety — CARLA Perception Safety Evaluation
 
-This repository contains the implementation and experimental results for
-the **Introduction to Machine Learning Safety** coursework. The project
-evaluates three binary CARLA perception classifiers for:
+This repository contains the implementation and experimental results for the **Introduction to Machine Learning Safety** coursework. The project evaluates three independent binary CARLA perception classifiers:
 
--   `has_pedestrian`
--   `has_traffic_light`
--   `has_vehicle`
+- `has_pedestrian`
+- `has_traffic_light`
+- `has_vehicle`
 
-The repository covers model training, clean-data evaluation,
-calibration, OOD analysis, adversarial robustness using FGSM, ODD
-k-projection coverage, and additional safety-oriented investigations.
+The evaluation covers model training and validation, clean performance, CARLA condition shifts, calibration, temperature scaling, OOD detection, FGSM robustness, ODD k-projection coverage, and additional safety analyses.
 
-------------------------------------------------------------------------
+---
 
-## 1. Project Overview
+## 1. Dataset
 
-The perception system uses forward-facing CARLA RGB images. Each image
-has three binary labels:
+The experiments use the CARLA RGB dataset with the following splits:
 
--   whether a pedestrian is present,
--   whether a traffic light is present,
--   whether a vehicle is present.
-
-A separate binary classifier is trained for each label using
-**ResNet-18**.
-
-The safety evaluation considers:
-
-1.  Model training and validation
-2.  Clean test-set performance
-3.  Evaluation across different CARLA test conditions
-4.  Reliability diagrams and Expected Calibration Error (ECE)
-5.  Temperature scaling
-6.  OOD detection
-7.  FGSM adversarial robustness
-8.  ODD k-projection coverage for `k ∈ {1,2,3}`
-9.  Additional safety analyses including class imbalance, ODD coverage
-    gaps, and threshold selection
-
-------------------------------------------------------------------------
-
-## 2. Dataset Structure
-
-The experiments use the following CARLA dataset splits:
-
-``` text
+```text
 Data2/
 ├── validation/
 │   ├── labels.csv
@@ -64,26 +33,19 @@ Data2/
     └── rgb-front/
 ```
 
-The image filename is generated from the `frame` column:
+The `CarlaDataset` constructs the image filename from the `frame` column, e.g. `frame=260` → `000260.jpg`.
 
-``` text
-frame 0      → 000000.jpg
-frame 260    → 000260.jpg
-```
+The final evaluation uses the complete **3,600-image test set**, rather than a 100-image subset.
 
-The dataset class loads each RGB image and returns the selected binary
-label.
+---
 
-------------------------------------------------------------------------
+## 2. Environment
 
-## 3. Environment
-
-The experiments were primarily executed in Google Colab with Google
-Drive used for dataset and model storage.
+Experiments were executed primarily in Google Colab using Google Drive for dataset/model storage.
 
 Main libraries:
 
-``` text
+```text
 Python
 PyTorch
 Torchvision
@@ -94,584 +56,289 @@ Matplotlib
 PIL
 ```
 
-A CUDA-enabled runtime was used when available.
+A CUDA runtime was used when available.
 
-Check the runtime with:
+---
 
-``` python
-import torch
+## 3. Model Architecture
 
-print(torch.cuda.is_available())
-print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
-```
+Each task uses a separate pretrained ResNet-18 model with the final fully connected layer replaced by one output logit:
 
-------------------------------------------------------------------------
-
-# 4. Dataset and DataLoader
-
-The CARLA dataset is implemented using a custom PyTorch `Dataset`.
-
-``` python
-from torch.utils.data import Dataset
-from PIL import Image
-import os
-import torch
-
-class CarlaDataset(Dataset):
-
-    def __init__(
-        self,
-        dataframe,
-        image_dir,
-        label_column,
-        transform=None
-    ):
-        self.dataframe = dataframe
-        self.image_dir = image_dir
-        self.label_column = label_column
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.dataframe)
-
-    def __getitem__(self, idx):
-
-        row = self.dataframe.iloc[idx]
-
-        image_name = f"{row['frame']:06d}.jpg"
-
-        image_path = os.path.join(
-            self.image_dir,
-            image_name
-        )
-
-        image = Image.open(
-            image_path
-        ).convert("RGB")
-
-        label = torch.tensor(
-            row[self.label_column],
-            dtype=torch.float32
-        )
-
-        if self.transform:
-            image = self.transform(image)
-
-        return image, label
-```
-
-The image preprocessing used for the ResNet-18 models is:
-
-``` python
-from torchvision import transforms
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor()
-])
-```
-
-------------------------------------------------------------------------
-
-# 5. Model Architecture
-
-Three independent binary classifiers are trained.
-
-``` python
+```python
 import torch.nn as nn
 from torchvision import models
 
 def create_model():
-
     model = models.resnet18(
         weights=models.ResNet18_Weights.DEFAULT
     )
-
     model.fc = nn.Linear(
         model.fc.in_features,
         1
     )
-
     return model
 ```
 
-The pretrained ResNet-18 backbone is retained and the final fully
-connected layer is replaced with a single output neuron.
+Binary predictions are obtained with:
 
-The output is a **logit**. Binary predictions are obtained using:
-
-``` python
+```python
 probability = torch.sigmoid(logit)
 prediction = int(probability > 0.5)
 ```
 
-------------------------------------------------------------------------
+---
 
-# 6. Training
+## 4. Final Training Configuration
 
-Each of the three classifiers is trained independently.
+The final models were retrained after correcting the train/validation dataset assignment.
 
-Tasks:
-
-``` python
-tasks = [
-    "has_pedestrian",
-    "has_traffic_light",
-    "has_vehicle"
-]
-```
-
-Training configuration:
-
-``` python
+```python
 criterion = nn.BCEWithLogitsLoss()
 
 optimizer = torch.optim.Adam(
     model.parameters(),
-    lr=1e-4,
-    weight_decay=1e-4
+    lr=0.0001
 )
 
 batch_size = 32
-epochs = 10
+epochs = 4
 ```
 
-The trained models are saved separately:
+The three classifiers were trained independently using the correct datasets:
 
-``` text
+```text
+Training → labels_train
+Validation → labels_validation
+Test → labels_test
+```
+
+The test set was not used for model selection.
+
+Final checkpoints:
+
+```text
 Data2/model/
 ├── has_pedestrian_model.pth
 ├── has_traffic_light_model.pth
 └── has_vehicle_model.pth
 ```
 
-A saved model can be loaded with:
+---
 
-``` python
-model = create_model().to(device)
+## 5. Preprocessing — Important Reproducibility Detail
 
-model.load_state_dict(
-    torch.load(
-        "/content/drive/MyDrive/Data2/model/has_pedestrian_model.pth",
-        map_location=device
+Two explicit transforms are used in the final pipeline. This prevents the model-inference preprocessing from being accidentally mixed with the FGSM pixel-space attack.
+
+### Model transform
+
+Used for training, validation, clean evaluation, reliability diagrams/ECE, temperature scaling, and normal model inference:
+
+```python
+model_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
     )
-)
-
-model.eval()
+])
 ```
 
-Replace `has_pedestrian` with the appropriate task when loading another
-classifier.
+### Attack transform
 
-------------------------------------------------------------------------
+Used to obtain images in the original `[0,1]` pixel space for FGSM generation:
 
-# 7. Clean Evaluation
-
-Clean evaluation is performed using the complete test set rather than a
-small random subset.
-
-For binary classification:
-
-``` python
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score
-)
-
-def evaluate_model(model, data_loader, device):
-
-    model.eval()
-
-    all_labels = []
-    all_predictions = []
-
-    model.to(device)
-
-    with torch.no_grad():
-
-        for images, labels in data_loader:
-
-            images = images.to(device)
-
-            outputs = model(images)
-
-            predictions = (
-                torch.sigmoid(outputs) > 0.5
-            ).int()
-
-            all_predictions.extend(
-                predictions.cpu().numpy().flatten()
-            )
-
-            all_labels.extend(
-                labels.cpu().numpy().flatten()
-            )
-
-    accuracy = accuracy_score(
-        all_labels,
-        all_predictions
-    )
-
-    precision = precision_score(
-        all_labels,
-        all_predictions,
-        zero_division=0
-    )
-
-    recall = recall_score(
-        all_labels,
-        all_predictions,
-        zero_division=0
-    )
-
-    f1 = f1_score(
-        all_labels,
-        all_predictions,
-        zero_division=0
-    )
-
-    return accuracy, precision, recall, f1
+```python
+attack_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
 ```
 
-Recall is particularly important because false negatives correspond to
-missed safety-critical objects.
+The final FGSM pipeline is:
 
-------------------------------------------------------------------------
-
-# 8. Evaluation Across Test Conditions
-
-The test data contains several conditions:
-
-``` text
-test
-test-fog
-test-night
-test-town-01
+```text
+raw image [0,1]
+      ↓
+FGSM perturbation
+      ↓
+clip to [0,1]
+      ↓
+normalize
+      ↓
+trained ResNet-18
 ```
 
-Each trained model is evaluated separately on each split.
+This separation is important because the trained ResNet expects normalized inputs, while the FGSM perturbation is bounded in pixel space.
 
-The resulting metrics are stored in a DataFrame and visualized using
-metric-versus-split plots.
+---
 
-This allows performance changes caused by weather, lighting, and
-environment changes to be investigated.
+## 6. Clean Evaluation
 
-------------------------------------------------------------------------
+Clean evaluation uses the final checkpoint, the complete test set, `model_transform`, and a 0.5 probability threshold.
 
-# 9. Confusion Matrix Analysis
+Recall is prioritized because false negatives correspond to missed safety-critical objects.
 
-Confusion matrices were used to investigate unexpected recall values.
+Recall is calculated as:
 
-For a binary classifier:
-
-``` text
-                 Predicted
-                 0       1
-Actual 0        TN      FP
-Actual 1        FN      TP
-```
-
-Recall is:
-
-``` text
+```text
 Recall = TP / (TP + FN)
 ```
 
-Confusion matrices were particularly important during the FGSM
-investigation because they showed whether a recall of zero was caused by
-a metric implementation error or by all positive samples becoming false
-negatives.
+Confusion matrices were also inspected to validate unexpected recall values.
 
-Example:
+---
 
-``` text
-[[  23   993]
- [2584     0]]
+## 7. Evaluation Across CARLA Conditions
+
+Each model was evaluated on:
+
+```text
+Validation
+Test
+Test-Fog
+Test-Night
+Test-Town-01
 ```
 
-gives:
+This evaluates sensitivity to weather, lighting, and environment changes.
 
-``` text
-TN = 23
-FP = 993
-FN = 2584
-TP = 0
-```
+---
 
-and therefore:
+## 8. Final Clean-Test Metrics
 
-``` text
-Recall = 0 / (0 + 2584) = 0
-```
+The final clean recall values used as the robustness baseline are:
 
-------------------------------------------------------------------------
+| Model | Recall (clean) | Threshold analysis |
+|---|---:|---:|
+| Pedestrian | **0.4972** | ≥ 0.90 |
+| Traffic light | **0.9853** | ≥ 0.85 |
+| Vehicle | **0.8989** | ≥ 0.85 |
 
-# 10. Calibration and Reliability Diagrams
+The threshold analysis indicates that the traffic-light and vehicle classifiers satisfy the selected recall thresholds, while the pedestrian classifier does not.
 
-Model confidence was evaluated using reliability diagrams.
+---
 
-The reliability diagram compares:
+## 9. Reliability Diagrams and ECE
 
-``` text
-Confidence → Accuracy
-```
+Reliability diagrams were generated for all three classifiers using `model_transform`.
 
-against the ideal calibration line:
+Final single-model ECE values:
 
-``` text
-Accuracy = Confidence
-```
+| Model | ECE (single) |
+|---|---:|
+| Pedestrian | **0.6803** |
+| Traffic light | **0.2705** |
+| Vehicle | **0.1879** |
 
-The experiments produced reliability diagrams for:
+The pedestrian classifier shows the largest calibration error.
 
--   `has_pedestrian`
--   `has_traffic_light`
--   `has_vehicle`
+---
 
-The observed ECE values before calibration were:
+## 10. Temperature Scaling
 
-``` text
-Pedestrian       0.7271
-Traffic light    0.2690
-Vehicle          0.1940
-```
+Temperature scaling was performed by selecting the temperature on the **validation set** and then evaluating calibration on the held-out test set. Both sets use `model_transform`.
 
-The pedestrian model showed the largest calibration error.
+For logit `z`:
 
-------------------------------------------------------------------------
-
-# 11. Temperature Scaling
-
-Temperature scaling was investigated using:
-
-``` python
-temperatures = [0.5, 1.0, 2.0]
-```
-
-For a model logit `z`:
-
-``` text
+```text
 p_T = sigmoid(z / T)
 ```
 
-The temperature changes confidence without changing the underlying model
-weights.
+Final ECE results:
 
-Probability distributions were plotted for the different temperature
-values.
+| Model | ECE (single) | ECE (temperature-scaled) |
+|---|---:|---:|
+| Pedestrian | **0.6803** | **0.5306** |
+| Traffic light | **0.2705** | **0.2601** |
+| Vehicle | **0.1879** | **0.1751** |
 
-Temperature selection should be based on validation/calibration data
-rather than using the final test set to choose a value.
+Temperature scaling improves ECE for all three classifiers, but the resulting ECE values remain substantially above a strict 0.05 target.
 
-------------------------------------------------------------------------
+---
 
-# 12. OOD Detection
+## 11. OOD Detection
 
-OOD evaluation was performed to investigate whether the perception
-system can distinguish in-distribution data from shifted or
-out-of-distribution conditions.
+OOD detection was evaluated using a k-NN detector.
 
-The evaluation included confidence-based/OOD scoring and comparison of
-ID and shifted data.
+Final reported evidence:
 
-The OOD results should be reproduced from the corresponding OOD
-evaluation cells in the notebook, using the same model checkpoints and
-dataset splits.
+| Model | Detector | AUROC | Met? |
+|---|---|---:|:---:|
+| Pedestrian | k-NN (4 neighbours) | **0.99352 (All OOD)** | ✓ |
 
-------------------------------------------------------------------------
+The reported pedestrian detector AUROC values were approximately **0.9871 for fog**, **0.9999 for night**, and **0.9935 overall**. The overall AUROC exceeds the 0.90 criterion used in the evaluation.
 
-# 13. FGSM Adversarial Evaluation
+---
 
-FGSM was implemented according to:
+## 12. FGSM Adversarial Attack
 
-``` text
-x_adv = x + ε sign(∇x L(x,y))
+FGSM follows the required formulation:
+
+```text
+x_adv = x + ε · sign(∇x L(y, f(x)))
 ```
 
-The implementation is:
+The tested perturbation magnitudes are:
 
-``` python
-import torch
-import torch.nn.functional as F
-
-def fgsm_attack(image, epsilon, gradient):
-
-    perturbed = (
-        image + epsilon * gradient.sign()
-    )
-
-    perturbed = torch.clamp(
-        perturbed,
-        0,
-        1
-    )
-
-    return perturbed
-```
-
-The adversarial example generation is:
-
-``` python
-def generate_adversarial_example(
-    model,
-    image,
-    label,
-    epsilon
-):
-
-    model.eval()
-
-    image = image.unsqueeze(0).to(device)
-
-    label = torch.tensor(
-        [[float(label)]],
-        device=device
-    )
-
-    image.requires_grad = True
-
-    output = model(image)
-
-    loss = F.binary_cross_entropy_with_logits(
-        output,
-        label
-    )
-
-    model.zero_grad()
-
-    loss.backward()
-
-    gradient = image.grad
-
-    adv_image = fgsm_attack(
-        image,
-        epsilon,
-        gradient
-    )
-
-    return adv_image.squeeze(0).detach()
-```
-
-The tested perturbation magnitudes were:
-
-``` python
+```python
 epsilons = [0.01, 0.05, 0.10]
 ```
 
-The complete test set was used for the final adversarial recall
-evaluation.
+The perturbation is generated in raw pixel space, clipped to `[0,1]`, and the resulting image is normalized before model inference.
 
-------------------------------------------------------------------------
+### Perturbation validation
 
-# 14. FGSM Pipeline Validation
+The maximum perturbation was independently checked:
 
-Because the initial adversarial recall results were unusually severe,
-the FGSM pipeline was independently investigated.
-
-The following checks were performed:
-
-### 14.1 Perturbation magnitude
-
-The perturbation was checked using:
-
-``` python
-difference = (
-    adv_image - image
-).abs()
-
-print(
-    difference.max().item()
-)
-
-print(
-    difference.mean().item()
-)
+```text
+ε = 0.01 → maximum ≈ 0.0100
+ε = 0.05 → maximum ≈ 0.0500
+ε = 0.10 → maximum ≈ 0.1000
 ```
 
-Observed maximum perturbations were approximately:
-
-``` text
-ε = 0.01 → 0.0100
-ε = 0.05 → 0.0500
-ε = 0.10 → 0.1000
-```
-
-confirming that the perturbations remain bounded by ε.
-
-### 14.2 Individual adversarial examples
-
-Correctly classified positive and negative images were inspected.
-
-For example, a pedestrian-positive sample changed from:
-
-``` text
-Clean prediction       = 1
-Adversarial prediction = 0
-```
-
-while a negative sample changed from:
-
-``` text
-Clean prediction       = 0
-Adversarial prediction = 1
-```
-
-### 14.3 Loss increase
+Individual positive and negative examples were also inspected to verify decision-boundary crossings.
 
 For the pedestrian classifier at ε = 0.01:
 
-``` text
-Average clean loss       = 1.0575
-Average adversarial loss = 6.1565
+```text
+Average clean BCE loss       = 1.0575
+Average adversarial BCE loss = 6.1565
 ```
 
-The substantial increase in loss provides additional evidence that the
-FGSM perturbation is successfully increasing the classification loss.
+The increased adversarial loss provides additional evidence that the perturbations successfully increase the model loss.
 
-------------------------------------------------------------------------
+---
 
-# 15. Final FGSM Recall Results
+## 13. FGSM Robustness — Exercise 8.5
 
-The full 3,600-image test set was used.
+The complete **3,600-image test set** is used for clean and adversarial evaluation.
 
-### Clean recall
+Recall drop is calculated as:
 
-``` text
-Pedestrian       0.0666
-Traffic light    0.9652
-Vehicle          0.2341
+```text
+Recall Drop = Clean Recall − Adversarial Recall
 ```
 
-### Adversarial recall
+Final reported results at ε = 0.05:
 
-  Model             Clean Recall   ε=0.01   ε=0.05   ε=0.10
-  --------------- -------------- -------- -------- --------
-  Pedestrian              0.0666   0.0000   0.0000   0.0014
-  Traffic light           0.9652   0.0000   0.0000   0.0000
-  Vehicle                 0.2341   0.0007   0.0000   0.0000
+| Model | Recall (clean) | Recall (FGSM) | Recall Drop |
+|---|---:|---:|---:|
+| Pedestrian | **0.4972** | **0.0042** | **99.16%** |
+| Traffic light | **0.9853** | **0.0000** | **100.00%** |
+| Vehicle | **0.8989** | **0.1770** | **80.31%** |
 
-Corresponding absolute recall drops:
+These results indicate substantial vulnerability to the tested FGSM perturbation.
 
-  Model             ε=0.01   ε=0.05   ε=0.10
-  --------------- -------- -------- --------
-  Pedestrian        0.0666   0.0666   0.0652
-  Traffic light     0.9652   0.9652   0.9652
-  Vehicle           0.2333   0.2341   0.2341
+Confusion matrices were inspected during the investigation to verify whether the recall reductions were caused by positive samples becoming false negatives rather than by an incorrect recall implementation.
 
-These results indicate substantial vulnerability to FGSM perturbations.
+---
 
-------------------------------------------------------------------------
+## 14. ODD Definition and k-Projection Coverage
 
-# 16. ODD Definition for k-Projection Coverage
+For the k-projection experiment, the ODD was represented using three dimensions aligned with the available CARLA scenarios:
 
-For the k-projection experiment, the ODD was represented using three
-dimensions that correspond directly to the available CARLA test
-scenarios:
-
-``` python
+```python
 odd_description = {
     "weather": ["clear", "fog"],
     "lighting": ["day", "night"],
@@ -679,183 +346,96 @@ odd_description = {
 }
 ```
 
-The four test scenario categories were represented as:
+The four evaluated scenario categories cover clear/day, fog/day, clear/night, and clear/day in Town-01 conditions.
 
-``` python
-test_scenarios = [
-    {
-        "weather": "clear",
-        "lighting": "day",
-        "environment": "standard_town"
-    },
-    {
-        "weather": "fog",
-        "lighting": "day",
-        "environment": "standard_town"
-    },
-    {
-        "weather": "clear",
-        "lighting": "night",
-        "environment": "standard_town"
-    },
-    {
-        "weather": "clear",
-        "lighting": "day",
-        "environment": "town_01"
-    }
-]
-```
+The `odd-coverage` implementation was used for `k ∈ {1,2,3}`.
 
-------------------------------------------------------------------------
+| k | Covered | Total | Coverage |
+|---:|---:|---:|---:|
+| 1 | 6 | 6 | **100%** |
+| 2 | 9 | 12 | **75%** |
+| 3 | 4 | 8 | **50%** |
 
-# 17. k-Projection Coverage
+The test set therefore has complete 1-way coverage, but only 75% 2-way and 50% 3-way coverage. Performance in uncovered ODD combinations is consequently not directly verified.
 
-The `odd-coverage` implementation is used to calculate coverage for:
+---
 
-``` text
-k = 1
-k = 2
-k = 3
-```
+## 15. Class Imbalance and Safety-Critical Recall
 
-The resulting coverage is:
+The CARLA test data contains unequal positive and negative classes. Because accuracy can hide poor detection of the positive safety-critical class, recall and confusion matrices are emphasized.
 
-    k   Covered   Total   Coverage
-  --- --------- ------- ----------
-    1         6       6   **100%**
-    2         9      12    **75%**
-    3         4       8    **50%**
+The final evaluation therefore reports recall alongside accuracy, precision, and F1 rather than relying on accuracy alone.
 
-The results show that all individual ODD conditions are represented,
-while coverage decreases for higher-order combinations. Several
-combinations therefore remain unverified.
+---
 
-------------------------------------------------------------------------
+## 16. Cost-Sensitive Threshold Analysis
 
-# 18. Additional Safety Analyses
+A default threshold of 0.5 was used for the baseline binary predictions. A separate threshold analysis considered the asymmetric safety consequences of false positives and false negatives.
 
-## 18.1 Class imbalance
+The reported thresholds were:
 
-The test set contains unequal proportions of positive and negative
-samples.
+| Model | Threshold |
+|---|---:|
+| Pedestrian | **≥ 0.90** |
+| Traffic light | **≥ 0.85** |
+| Vehicle | **≥ 0.85** |
 
-For example, the pedestrian test set contains:
+Threshold selection should be based on validation data and fixed before final test evaluation.
 
-``` text
-Positive samples = 706
-Negative samples = 2894
-```
+---
 
-Therefore, accuracy alone is not an adequate safety metric. Recall is
-prioritized because false negatives correspond to missed safety-critical
-objects.
+## 17. Additional Validation of Unexpected FGSM Results
 
-Clean-test recalls were:
+The initially observed severe FGSM degradation was not accepted without investigation. The following checks were performed:
 
-``` text
-Pedestrian       0.0666
-Traffic light    0.9652
-Vehicle          0.2341
-```
+1. **Confusion matrices** were inspected to identify the source of recall reduction.
+2. **Perturbation magnitude** was independently measured and verified to remain bounded by ε.
+3. **Positive and negative individual samples** were inspected for decision-boundary crossings.
+4. **Average BCE loss** was compared between clean and adversarial inputs.
+5. The evaluation pipeline was checked for consistency of model checkpoint, test dataset, threshold, and preprocessing.
+6. The final preprocessing was separated into `model_transform` and `attack_transform` to avoid the earlier normalization mismatch.
 
-------------------------------------------------------------------------
+These checks provide supporting evidence for the reported adversarial degradation.
 
-## 18.2 ODD coverage gaps
+---
 
-The k-projection results demonstrate:
+## 18. Reproducibility Workflow
 
-``` text
-1-way coverage = 100%
-2-way coverage = 75%
-3-way coverage = 50%
-```
+To reproduce the final evaluation:
 
-Therefore, complete 1-way coverage does not imply that higher-order
-interactions between operating conditions have been tested.
+1. Start a CUDA-enabled Google Colab runtime if available.
+2. Mount Google Drive.
+3. Place the `Data2` directory at `/content/drive/MyDrive/Data2/`.
+4. Verify all dataset splits and their `labels.csv` files.
+5. Define `CarlaDataset`.
+6. Define `model_transform` and `attack_transform` separately.
+7. Define the ResNet-18 `create_model()` function.
+8. Train each classifier for **4 epochs** using `labels_train` and validate using `labels_validation`.
+9. Save the three model checkpoints.
+10. Evaluate clean performance on the complete test set using `model_transform`.
+11. Evaluate Validation, Test, Test-Fog, Test-Night, and Test-Town-01.
+12. Generate reliability diagrams and calculate ECE using `model_transform`.
+13. Select temperature using validation data and calculate calibrated test ECE.
+14. Run the OOD detector using the final model/checkpoint setup.
+15. Generate FGSM examples for ε = 0.01, 0.05, and 0.10 using `attack_transform`.
+16. Verify perturbation bounds and inspect clean/adversarial examples.
+17. Evaluate adversarial recall on the complete test set.
+18. Calculate recall drops and inspect confusion matrices.
+19. Run k-projection coverage for `k = 1, 2, 3`.
+20. Perform class-imbalance and threshold analyses.
 
-Performance in the uncovered combinations should not be assumed without
-additional testing.
+---
 
-------------------------------------------------------------------------
+## 19. Final Safety Summary
 
-## 18.3 Cost-sensitive threshold
+The final experiments demonstrate that strong clean performance does not by itself establish safety.
 
-The baseline classifier uses:
+- The pedestrian classifier has substantially lower clean recall (**0.4972**) than the traffic-light (**0.9853**) and vehicle (**0.8989**) classifiers.
+- FGSM at ε = 0.05 causes severe recall degradation for all three classifiers, with reported recall drops of **99.16%**, **100.00%**, and **80.31%**.
+- Temperature scaling improves calibration but does not reduce ECE below the strict target used in the evaluation.
+- The k-NN OOD detector shows strong reported separation for the evaluated OOD scenarios, with overall AUROC **0.99352**.
+- ODD coverage is complete for 1-way combinations but falls to **75% for 2-way** and **50% for 3-way** combinations.
+- Class imbalance makes recall particularly important for safety-critical interpretation.
+- Threshold selection should account for asymmetric false-positive and false-negative consequences.
 
-``` python
-prediction = int(probability > 0.5)
-```
-
-From a safety perspective, a fixed threshold of 0.5 is not necessarily
-optimal because false positives and false negatives have asymmetric
-consequences.
-
-A cost-optimal threshold `τ*` should be selected using validation data
-and a safety-relevant cost function that penalizes critical false
-negatives appropriately. The selected threshold should then be fixed
-before final test evaluation.
-
-------------------------------------------------------------------------
-
-# 19. Reproducibility Checklist
-
-To reproduce the complete evaluation:
-
-1.  Start a CUDA-enabled Google Colab runtime if GPU evaluation is
-    desired.
-2.  Mount Google Drive.
-3.  Place the CARLA `Data2` directory at:
-
-``` text
-/content/drive/MyDrive/Data2/
-```
-
-4.  Verify the five dataset splits:
-    -   `validation`
-    -   `test`
-    -   `test-fog`
-    -   `test-night`
-    -   `test-town-01`
-5.  Define the `CarlaDataset` class.
-6.  Define the image transformation.
-7.  Define `create_model()`.
-8.  Train the three classifiers or load the saved checkpoints.
-9.  Run clean evaluation.
-10. Run evaluation across the available test splits.
-11. Generate reliability diagrams and calculate ECE.
-12. Run temperature-scaling analysis.
-13. Run the OOD evaluation using the corresponding notebook cells.
-14. Run the FGSM implementation with ε = 0.01, 0.05 and 0.10.
-15. Validate FGSM perturbation magnitude and loss increase.
-16. Evaluate adversarial recall using the complete test set.
-17. Download/import `kprojection.py` from the `odd-coverage` repository.
-18. Define the three-dimensional ODD.
-19. Compute k-projection coverage for `k = 1, 2, 3`.
-20. Use the resulting evidence in the safety-case report.
-
-------------------------------------------------------------------------
-
-# 20. Main Safety Findings
-
-The experiments demonstrate several important safety concerns:
-
--   Clean performance differs substantially between the three perception
-    classifiers.
--   The pedestrian and vehicle classifiers have low clean recall.
--   The traffic-light classifier has high clean recall but loses all
-    positive-class recall under FGSM.
--   FGSM perturbations were independently validated through perturbation
-    bounds, confusion matrices, individual examples, and loss increase.
--   Calibration is imperfect for all three models, with the largest ECE
-    observed for the pedestrian classifier.
--   ODD coverage decreases from 100% at 1-way interactions to 50% at
-    3-way interactions.
--   Higher-order ODD combinations remain unverified.
--   A fixed probability threshold of 0.5 does not explicitly account for
-    the asymmetric safety consequences of false positives and false
-    negatives.
-
-These results demonstrate that **high clean-data performance alone is
-insufficient to establish ML safety**. Robustness, calibration, ODD
-coverage, and system-level handling of model uncertainty must also be
-considered.
+Overall, the evaluation highlights limitations in adversarial robustness, calibration, and higher-order ODD coverage despite strong performance on some clean and OOD metrics.

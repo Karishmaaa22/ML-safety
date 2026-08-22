@@ -370,8 +370,7 @@ The final evaluation therefore reports recall alongside accuracy, precision, and
 
 ## 16. Cost-Sensitive Threshold Analysis
 
-A default threshold of 0.5 was used for the baseline binary predictions. A separate threshold analysis considered the asymmetric safety consequences of false positives and false negatives.
-
+The baseline classification threshold was 0.5. For safety verification, the following minimum recall criteria were used: pedestrian ≥ 0.90, traffic light ≥ 0.85, and vehicle ≥ 0.85. These values are evaluation criteria rather than the model's classification threshold.
 The reported thresholds were:
 
 | Model | Threshold |
